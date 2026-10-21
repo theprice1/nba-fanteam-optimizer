@@ -24,7 +24,18 @@ HIST_COLS = [
     "own",
     "score",
 ]
-MIN_ROWS = 30  # calibrate only once there is enough history
+MIN_SLATES = 3  # calibrate only after several slates, so one unusual night cannot drive the model
+MIN_ROWS = 90
+
+
+NUM_COLS = ["price", "proj", "prior_own", "own", "score"]
+
+
+def _num(h):
+    h = h.copy()
+    for c in NUM_COLS:
+        h[c] = pd.to_numeric(h[c], errors="coerce")
+    return h
 
 
 def parse_paste(text):
@@ -98,7 +109,7 @@ def snapshot(pool, slate, hist):
         }
     )
     kept = hist[hist.slate != slate] if len(hist) else hist
-    return pd.concat([kept, rows], ignore_index=True)
+    return _num(pd.concat([kept, rows], ignore_index=True))
 
 
 def attach(hist, slate, field):
@@ -115,7 +126,7 @@ def attach(hist, slate, field):
     hist = hist.copy()
     hist.loc[mask, "own"] = keys.map(f["own"]).fillna(0.0).to_numpy()
     hist.loc[mask, "score"] = keys.map(f["score"]).to_numpy()
-    return hist, int(keys.isin(f.index).sum())
+    return _num(hist), int(keys.isin(f.index).sum())
 
 
 def _design(df):
@@ -128,7 +139,7 @@ def _design(df):
 def fit(hist):
     """Log-linear ownership model on projection, price and possible status."""
     h = hist.dropna(subset=["own", "proj", "price", "status"])
-    if len(h) < MIN_ROWS:
+    if h.slate.nunique() < MIN_SLATES or len(h) < MIN_ROWS:
         return None
     y = np.log(np.asarray(h.own, dtype=float) + 0.5)
     beta, *_ = np.linalg.lstsq(_design(h), y, rcond=None)
@@ -165,4 +176,25 @@ def play_rates(hist):
         h.groupby("status")
         .agg(players=("played", "size"), played_rate=("played", "mean"))
         .round(2)
+    )
+
+
+def slate_summary(hist):
+    """One row per saved slate: players, ownership coverage, and projection error."""
+    rows = []
+    for slate, h in hist.groupby("slate"):
+        scored = h.dropna(subset=["proj", "score"])
+        scored = scored[scored.score > 0]
+        e = scored.score - scored.proj
+        rows.append(
+            {
+                "slate": slate,
+                "players": len(h),
+                "ownership_attached": int(h.own.notna().sum()),
+                "mae": round(float(e.abs().mean()), 2) if len(e) else np.nan,
+                "bias": round(float(e.mean()), 2) if len(e) else np.nan,
+            }
+        )
+    return pd.DataFrame(
+        rows, columns=["slate", "players", "ownership_attached", "mae", "bias"]
     )

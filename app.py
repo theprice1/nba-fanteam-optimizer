@@ -3,6 +3,18 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
+from intel import (
+    best_per_position,
+    error_trend,
+    history_scatter,
+    leverage_board,
+    leverage_chart,
+    own_vs_points_chart,
+    team_chart,
+    team_totals,
+    top_owned,
+    value_board,
+)
 from optimizer import build_set, load_players, summarise
 from ownership import (
     HIST_COLS,
@@ -14,6 +26,7 @@ from ownership import (
     parse_paste,
     play_rates,
     report,
+    slate_summary,
     snapshot,
 )
 
@@ -81,31 +94,25 @@ st.markdown(
 c1, c2 = st.columns(2)
 dft = c1.file_uploader("Projections · Daily Fantasy Tips CSV", type="csv")
 fan = c2.file_uploader("Player list · Fanteam CSV", type="csv")
-if not (fan and dft):
-    st.info(
-        "Upload tonight's Fanteam player list and Daily Fantasy Tips projections to begin."
-    )
-    st.stop()
 
-try:
-    pool = load_players(fan, dft, sharp)
-except (
-    KeyError,
-    ValueError,
-) as e:  # missing columns or unreadable files, shown in the page
-    st.error(f"Could not read the files: {e}")
-    st.stop()
+pool = None
+if fan and dft:
+    try:
+        pool = load_players(fan, dft, sharp)
+    except (KeyError, ValueError) as e:
+        st.error(f"Could not read the files: {e}")
+else:
+    st.info(
+        "Upload tonight's player list and projections to unlock the daily intel and the "
+        "lineup builder. The ownership section works without them."
+    )
 
 if "hist" not in st.session_state:
     st.session_state.hist = pd.DataFrame(columns=HIST_COLS)
 
-# ---- Ownership & history -------------------------------------------------------------
-with st.expander("Ownership & history", expanded=True):
-    st.caption(
-        "Save each slate's projections before lock, then attach the field's ownership after it "
-        "locks. The history grows every night and improves the ownership model. Cloud storage "
-        "resets, so download the history and upload it again next session."
-    )
+# ---- Ownership & history: always visible --------------------------------------------
+with st.container(border=True):
+    st.subheader("Ownership & history")
     h_up = st.file_uploader("Load saved history (CSV)", type="csv", key="hist_up")
     if (
         h_up is not None
@@ -114,43 +121,49 @@ with st.expander("Ownership & history", expanded=True):
         st.session_state.hist = load_hist(h_up)
         st.session_state.hist_src = f"{h_up.name}-{h_up.size}"
 
-    slate = st.date_input("Slate date", value=date.today()).isoformat()
-    if st.button("Save projections for this slate"):
-        st.session_state.hist = snapshot(pool, slate, st.session_state.hist)
-        st.success(f"Saved {len(pool)} players for {slate}.")
-
-    paste = st.text_area(
-        "Paste the Fanteam ownership table",
-        height=150,
-        placeholder="Copy the table from Fanteam and paste it here",
-    )
-    own_csv = st.file_uploader("…or upload an ownership CSV", type="csv", key="own_up")
-    saved = sorted(st.session_state.hist.slate.unique())
-    target = st.selectbox("Attach to slate", saved) if saved else None
-    if st.button("Attach ownership", disabled=target is None):
-        if paste.strip():
-            field, bad = parse_paste(paste)
-        elif own_csv is not None:
-            field, bad = parse_csv(own_csv)
-        else:
-            field, bad = None, 0
-        if field is None or field.empty:
-            st.warning("Paste the table or upload a CSV first.")
-        else:
-            st.session_state.hist, matched = attach(
-                st.session_state.hist, target, field
-            )
-            total = field.own.sum()
-            st.success(
-                f"Attached {len(field)} players to {target}; {matched} matched. "
-                f"Ownership sums to {total:.0f}%."
-            )
-            if abs(total - 700) > 10:
-                st.warning(
-                    "Ownership should sum to about 700%. Check for missing rows."
+    left, right = st.columns(2)
+    with left:
+        st.markdown("**Save projections for a slate**")
+        slate = st.date_input("Slate date", value=date.today()).isoformat()
+        if st.button("Save projections", disabled=pool is None):
+            st.session_state.hist = snapshot(pool, slate, st.session_state.hist)
+            st.success(f"Saved {len(pool)} players for {slate}.")
+    with right:
+        st.markdown("**Attach ownership to a saved slate**")
+        paste = st.text_area(
+            "Paste the Fanteam ownership table",
+            height=150,
+            placeholder="Copy the table from Fanteam and paste it here",
+        )
+        own_csv = st.file_uploader(
+            "…or upload an ownership CSV", type="csv", key="own_up"
+        )
+        saved = sorted(st.session_state.hist.slate.unique())
+        target = st.selectbox("Attach to slate", saved) if saved else None
+        if st.button("Attach ownership", disabled=target is None):
+            if paste.strip():
+                field, bad = parse_paste(paste)
+            elif own_csv is not None:
+                field, bad = parse_csv(own_csv)
+            else:
+                field, bad = None, 0
+            if field is None or field.empty:
+                st.warning("Paste the table or upload a CSV first.")
+            else:
+                st.session_state.hist, matched = attach(
+                    st.session_state.hist, target, field
                 )
-            if bad:
-                st.caption(f"{bad} lines could not be read.")
+                total = field.own.sum()
+                st.success(
+                    f"Attached {len(field)} players to {target}; {matched} matched. "
+                    f"Ownership sums to {total:.0f}%."
+                )
+                if abs(total - 700) > 10:
+                    st.warning(
+                        "Ownership should sum to about 700%. Check for missing rows."
+                    )
+                if bad:
+                    st.caption(f"{bad} lines could not be read.")
 
     hist = st.session_state.hist
     beta = fit(hist)
@@ -160,66 +173,134 @@ with st.expander("Ownership & history", expanded=True):
     m[1].metric("Player-slates", len(hist))
     m[2].metric("Projection error (MAE)", f"{rep['mae']:.1f}" if rep else "—")
     m[3].metric("Ownership model", "Calibrated" if beta is not None else "Prior")
-    if not hist.empty:
-        st.download_button(
-            "Download history CSV",
-            hist.to_csv(index=False),
-            "courtside_history.csv",
-            "text/csv",
-        )
-        rates = play_rates(hist)
-        if not rates.empty:
+    st.caption(
+        "The ownership model calibrates after 3 saved slates with ownership attached."
+    )
+
+    history_tab, detail_tab = st.tabs(["Slate history", "Slate detail"])
+    with history_tab:
+        summary = slate_summary(hist)
+        if summary.empty:
             st.caption(
-                "Share of each status that scored (from slates with ownership attached)"
+                "No history yet. Save a slate's projections, then attach its ownership."
             )
-            st.dataframe(rates)
+        else:
+            st.dataframe(summary, hide_index=True)
+            if summary.mae.notna().sum() >= 2:
+                st.altair_chart(error_trend(summary))
+            if rep:
+                st.altair_chart(history_scatter(hist))
+            rates = play_rates(hist)
+            if not rates.empty:
+                st.caption(
+                    "Share of each status that scored, from slates with ownership attached"
+                )
+                st.dataframe(rates)
+            st.download_button(
+                "Download history CSV",
+                hist.to_csv(index=False),
+                "courtside_history.csv",
+                "text/csv",
+            )
+    with detail_tab:
+        slates = sorted(hist.slate.unique())
+        if slates:
+            view = st.selectbox(
+                "Slate", slates, index=len(slates) - 1, key="view_slate"
+            )
+            st.altair_chart(own_vs_points_chart(hist, view))
+            st.dataframe(top_owned(hist, view), hide_index=True)
+        else:
+            st.caption("Nothing to show yet.")
 
-# ---- Build -------------------------------------------------------------------------------
-pool = pool.assign(own=calibrated_own(pool, beta) if beta is not None else pool.own)
-names = sorted(pool["name"])
-ex = st.multiselect("Exclude", names)
-lk = st.multiselect("Lock in", names)
-banned = set(pool.loc[pool.name.isin(ex), "pid"])
-locked = set(pool.loc[pool.name.isin(lk), "pid"])
-opp_of = {
-    t: o
-    for t, o in pool[["team", "opp"]].drop_duplicates().itertuples(index=False)
-    if isinstance(o, str)
-}
+# ---- Daily intel: only once the player list and projections are loaded -------------
+if pool is not None:
+    pool = pool.assign(own=calibrated_own(pool, beta) if beta is not None else pool.own)
+    st.subheader("Daily intel")
+    st.caption(
+        f"Projected ownership comes from the {'calibrated model' if beta is not None else 'prior'}. "
+        "Expected points allow for injured teammates through the safety nets."
+    )
+    k = st.columns(4)
+    k[0].metric("Eligible players", len(pool))
+    k[1].metric("Teams", pool.team.nunique())
+    k[2].metric("Top expected points", f"{pool.ev.max():.1f}")
+    k[3].metric("Budget", f"{budget:.1f}m")
 
-m1, m2, m3 = st.columns(3)
-m1.metric("Eligible players", len(pool))
-m2.metric("Teams", pool.team.nunique())
-m3.metric("Budget", f"{budget:.1f}m")
+    v_tab, lev_tab, team_tab, pos_tab = st.tabs(
+        ["Value", "Leverage", "Teams", "Positions"]
+    )
+    with v_tab:
+        st.caption(
+            "Expected points per million. Cheap players near the top are where the budget works hardest."
+        )
+        st.dataframe(value_board(pool), hide_index=True)
+    with lev_tab:
+        st.caption(
+            "Top-left is the leverage zone: high expected points, low projected ownership."
+        )
+        st.altair_chart(leverage_chart(pool))
+        st.dataframe(leverage_board(pool), hide_index=True)
+    with team_tab:
+        st.caption(
+            "Teams with the highest projected totals are the usual stacking candidates."
+        )
+        st.altair_chart(team_chart(team_totals(pool)))
+    with pos_tab:
+        st.caption("Best three per position by expected points per million.")
+        st.dataframe(best_per_position(pool), hide_index=True)
 
-if st.button("Build lineups", type="primary"):
-    with st.spinner("Solving lineups…"):
-        sets = build_set(
-            pool, budget, mode, n, stack, lam, max_team, overlap, locked, banned, opp_of
-        )
-    if not sets:
-        st.error("No feasible lineup. Loosen the budget, team cap or locks.")
-    export = []
-    for num, (ids, kind) in enumerate(sets, 1):
-        rows, s = summarise(pool, ids, kind)
-        st.markdown(
-            lineup_card(num, rows, s, auto and num <= 3), unsafe_allow_html=True
-        )
-        export += [
-            {
-                "lineup": num,
-                "fanteam_id": r.pid,
-                "player": r["name"],
-                "pos": r.pos,
-                "team": r.team,
-                "price": r.price,
-            }
-            for _, r in rows.iterrows()
-        ]
-    if export:
-        st.download_button(
-            "Download lineups CSV",
-            pd.DataFrame(export).to_csv(index=False),
-            "courtside_lineups.csv",
-            "text/csv",
-        )
+    # ---- Build lineups -----------------------------------------------------------------
+    st.subheader("Build lineups")
+    names = sorted(pool["name"])
+    ex = st.multiselect("Exclude", names)
+    lk = st.multiselect("Lock in", names)
+    banned = set(pool.loc[pool.name.isin(ex), "pid"])
+    locked = set(pool.loc[pool.name.isin(lk), "pid"])
+    opp_of = {
+        t: o
+        for t, o in pool[["team", "opp"]].drop_duplicates().itertuples(index=False)
+        if isinstance(o, str)
+    }
+
+    if st.button("Build lineups", type="primary"):
+        with st.spinner("Solving lineups…"):
+            sets = build_set(
+                pool,
+                budget,
+                mode,
+                n,
+                stack,
+                lam,
+                max_team,
+                overlap,
+                locked,
+                banned,
+                opp_of,
+            )
+        if not sets:
+            st.error("No feasible lineup. Loosen the budget, team cap or locks.")
+        export = []
+        for num, (ids, kind) in enumerate(sets, 1):
+            rows, s = summarise(pool, ids, kind)
+            st.markdown(
+                lineup_card(num, rows, s, auto and num <= 3), unsafe_allow_html=True
+            )
+            export += [
+                {
+                    "lineup": num,
+                    "fanteam_id": r.pid,
+                    "player": r["name"],
+                    "pos": r.pos,
+                    "team": r.team,
+                    "price": r.price,
+                }
+                for _, r in rows.iterrows()
+            ]
+        if export:
+            st.download_button(
+                "Download lineups CSV",
+                pd.DataFrame(export).to_csv(index=False),
+                "courtside_lineups.csv",
+                "text/csv",
+            )
