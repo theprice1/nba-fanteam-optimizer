@@ -1,222 +1,168 @@
-from datetime import date
+"""Courtside ownership: parse field ownership, keep a daily history, calibrate from it."""
 
+import re
+
+import numpy as np
 import pandas as pd
-import streamlit as st
 
-from optimizer import build_set, load_players, summarise
-from ownership import (
-    HIST_COLS,
-    attach,
-    calibrated_own,
-    fit,
-    load_hist,
-    parse_csv,
-    parse_paste,
-    play_rates,
-    report,
-    snapshot,
+from optimizer import norm
+
+ROW = re.compile(
+    r"^(?P<name>.+?)\s+(?P<pos>PG|SG|SF|PF|C)\s+(?P<team>[A-Z]{2,3})\s+"
+    r"(?P<price>[\d.]+)M?\s+(?P<own>[\d.]+%|N/A)\s+(?P<form>\S+)\s+(?P<score>\S+)$"
 )
-
-CSS = """
-@import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;800&family=Barlow:wght@400;600&display=swap');
-:root{--navy:#0b1426;--panel:#121d33;--blue:#1d428a;--orange:#ff7a18;--ink:#eef2fb;--muted:#8a97b5}
-.stApp{background:radial-gradient(1100px 520px at 0% -10%,#1d428a66,transparent),linear-gradient(180deg,#070d1b,#0b1426);color:var(--ink);font-family:Barlow,sans-serif}
-h1,h2,h3{font-family:'Barlow Condensed',sans-serif;text-transform:uppercase;letter-spacing:.04em}
-.hero{background:linear-gradient(120deg,var(--blue),#0b1426 65%);border:1px solid #ffffff14;border-left:6px solid var(--orange);border-radius:18px;padding:20px 26px;margin-bottom:18px}
-.hero h1{margin:0;font-size:2.6rem;font-weight:800}
-.hero p{margin:2px 0 0;color:var(--muted)}
-.card{background:var(--panel);border:1px solid #ffffff14;border-radius:18px;padding:16px 18px;margin-bottom:14px;box-shadow:0 12px 30px #00000066}
-.head{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:12px}
-.lbl{font-family:'Barlow Condensed';font-weight:800;font-size:1.4rem;text-transform:uppercase}
-.tag{font-family:'Barlow Condensed';font-weight:800;color:var(--navy);background:var(--orange);border-radius:999px;padding:2px 12px;margin-right:8px}
-.stats{display:flex;gap:16px;color:var(--muted);font-size:.9rem}
-.stats b{color:var(--ink);font-family:'Barlow Condensed';font-size:1.15rem}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px}
-.pl{background:var(--navy);border:1px solid #ffffff18;border-radius:14px;padding:10px 12px;border-top:3px solid var(--blue)}
-.pos{font-family:'Barlow Condensed';font-weight:800;color:var(--orange);font-size:.85rem;letter-spacing:.06em}
-.nm{font-weight:600;margin:2px 0 6px}
-.nums{display:flex;justify-content:space-between;font-family:'Barlow Condensed';font-size:1.02rem;color:var(--muted)}
-.nums b{color:var(--ink)}
-"""
+HIST_COLS = [
+    "slate",
+    "key",
+    "name",
+    "team",
+    "pos",
+    "price",
+    "proj",
+    "status",
+    "prior_own",
+    "own",
+    "score",
+]
+MIN_ROWS = 30  # calibrate only once there is enough history
 
 
-def lineup_card(num, rows, s, main):
-    tag = '<span class="tag">MAIN</span>' if main else ""
-    chips = "".join(
-        f'<div class="pl"><div class="pos">{r["pos"]} · {r["team"]}</div>'
-        f'<div class="nm">{r["name"]}</div>'
-        f'<div class="nums"><span><b>{r["price"]:.1f}</b>m</span>'
-        f"<span><b>{r['ev']:.1f}</b> pts</span><span><b>{r['own']:.1f}</b>%</span></div></div>"
-        for _, r in rows.iterrows()
-    )
-    head = (
-        f'<div class="head"><div>{tag}<span class="lbl">Lineup {num}</span></div>'
-        f'<div class="stats"><span>Cost <b>{s["cost"]:.1f}m</b></span>'
-        f"<span>Proj <b>{s['ev']:.1f}</b></span><span>Own Σ <b>{s['own']:.0f}%</b></span>"
-        f"<span>Stack <b>{s['stack']} {s['team']}</b></span></div></div>"
-    )
-    return f'<div class="card">{head}<div class="grid">{chips}</div></div>'
-
-
-st.set_page_config(page_title="Courtside · Fanteam NBA", page_icon="🏀", layout="wide")
-st.markdown(f"<style>{CSS}</style>", unsafe_allow_html=True)
-
-with st.sidebar:
-    st.markdown("### Contest")
-    budget = st.number_input("Budget (m)", 50.0, 120.0, 85.0, 0.5)
-    mode = st.radio("Mode", ["Auto · Tournament", "GPP", "Cash", "Pure projection"])
-    auto = mode.startswith("Auto")
-    n = st.slider("Lineups", 1, 10, 10 if auto else 3)
-    stack = "none" if auto else st.selectbox("Stacking", ["team", "bring-back", "none"])
-    lam = 0.10 if auto else st.slider("Ownership penalty λ", 0.0, 0.3, 0.10, 0.01)
-    max_team = st.slider("Max per team", 2, 5, 4)
-    overlap = st.slider("Max shared players", 3, 6, 4)
-    sharp = st.slider("Ownership sharpness (prior)", 0.02, 0.15, 0.08, 0.01)
-
-st.markdown(
-    '<div class="hero"><h1>Courtside</h1><p>Fanteam NBA · main slate lineup engine</p></div>',
-    unsafe_allow_html=True,
-)
-
-c1, c2 = st.columns(2)
-dft = c1.file_uploader("Projections · Daily Fantasy Tips CSV", type="csv")
-fan = c2.file_uploader("Player list · Fanteam CSV", type="csv")
-if not (fan and dft):
-    st.info(
-        "Upload tonight's Fanteam player list and Daily Fantasy Tips projections to begin."
-    )
-    st.stop()
-
-try:
-    pool = load_players(fan, dft, sharp)
-except Exception as e:  # surface file problems instead of crashing the page
-    st.error(f"Could not read the files: {e}")
-    st.stop()
-
-if "hist" not in st.session_state:
-    st.session_state.hist = pd.DataFrame(columns=HIST_COLS)
-
-# ---- Ownership & history -------------------------------------------------------------
-with st.expander("Ownership & history", expanded=True):
-    st.caption(
-        "Save each slate's projections before lock, then attach the field's ownership after it "
-        "locks. The history grows every night and improves the ownership model. Cloud storage "
-        "resets, so download the history and upload it again next session."
-    )
-    h_up = st.file_uploader("Load saved history (CSV)", type="csv", key="hist_up")
-    if (
-        h_up is not None
-        and st.session_state.get("hist_src") != f"{h_up.name}-{h_up.size}"
-    ):
-        st.session_state.hist = load_hist(h_up)
-        st.session_state.hist_src = f"{h_up.name}-{h_up.size}"
-
-    slate = st.date_input("Slate date", value=date.today()).isoformat()
-    if st.button("Save projections for this slate"):
-        st.session_state.hist = snapshot(pool, slate, st.session_state.hist)
-        st.success(f"Saved {len(pool)} players for {slate}.")
-
-    paste = st.text_area(
-        "Paste the Fanteam ownership table",
-        height=150,
-        placeholder="Copy the table from Fanteam and paste it here",
-    )
-    own_csv = st.file_uploader("…or upload an ownership CSV", type="csv", key="own_up")
-    saved = sorted(st.session_state.hist.slate.unique())
-    target = st.selectbox("Attach to slate", saved) if saved else None
-    if st.button("Attach ownership", disabled=target is None):
-        if paste.strip():
-            field, bad = parse_paste(paste)
-        elif own_csv is not None:
-            field, bad = parse_csv(own_csv)
-        else:
-            field, bad = None, 0
-        if field is None or field.empty:
-            st.warning("Paste the table or upload a CSV first.")
-        else:
-            st.session_state.hist, matched = attach(
-                st.session_state.hist, target, field
-            )
-            total = field.own.sum()
-            st.success(
-                f"Attached {len(field)} players to {target}; {matched} matched. "
-                f"Ownership sums to {total:.0f}%."
-            )
-            if abs(total - 700) > 10:
-                st.warning(
-                    "Ownership should sum to about 700%. Check for missing rows."
-                )
-            if bad:
-                st.caption(f"{bad} lines could not be read.")
-
-    hist = st.session_state.hist
-    beta = fit(hist)
-    rep = report(hist)
-    m = st.columns(4)
-    m[0].metric("Slates saved", hist.slate.nunique())
-    m[1].metric("Player-slates", len(hist))
-    m[2].metric("Projection error (MAE)", f"{rep['mae']:.1f}" if rep else "—")
-    m[3].metric("Ownership model", "Calibrated" if beta is not None else "Prior")
-    if not hist.empty:
-        st.download_button(
-            "Download history CSV",
-            hist.to_csv(index=False),
-            "courtside_history.csv",
-            "text/csv",
-        )
-        rates = play_rates(hist)
-        if not rates.empty:
-            st.caption(
-                "Share of each status that scored (from slates with ownership attached)"
-            )
-            st.dataframe(rates)
-
-# ---- Build -------------------------------------------------------------------------------
-pool = pool.assign(own=calibrated_own(pool, beta) if beta is not None else pool.own)
-names = sorted(pool["name"])
-ex = st.multiselect("Exclude", names)
-lk = st.multiselect("Lock in", names)
-banned = set(pool.loc[pool.name.isin(ex), "pid"])
-locked = set(pool.loc[pool.name.isin(lk), "pid"])
-opp_of = {
-    t: o
-    for t, o in pool[["team", "opp"]].drop_duplicates().itertuples(index=False)
-    if isinstance(o, str)
-}
-
-m1, m2, m3 = st.columns(3)
-m1.metric("Eligible players", len(pool))
-m2.metric("Teams", pool.team.nunique())
-m3.metric("Budget", f"{budget:.1f}m")
-
-if st.button("Build lineups", type="primary"):
-    with st.spinner("Solving lineups…"):
-        sets = build_set(
-            pool, budget, mode, n, stack, lam, max_team, overlap, locked, banned, opp_of
-        )
-    if not sets:
-        st.error("No feasible lineup. Loosen the budget, team cap or locks.")
-    export = []
-    for num, (ids, kind) in enumerate(sets, 1):
-        rows, s = summarise(pool, ids, kind)
-        st.markdown(
-            lineup_card(num, rows, s, auto and num <= 3), unsafe_allow_html=True
-        )
-        export += [
+def parse_paste(text):
+    """Read rows copied from the Fanteam ownership table. Returns (field, lines_not_read)."""
+    rows, bad = [], 0
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.lower().startswith("player"):
+            continue
+        m = ROW.match(line)
+        if not m:
+            bad += 1
+            continue
+        own, score = m["own"], m["score"]
+        rows.append(
             {
-                "lineup": num,
-                "fanteam_id": r.pid,
-                "player": r["name"],
-                "pos": r.pos,
-                "team": r.team,
-                "price": r.price,
+                "name": m["name"].strip(),
+                "team": m["team"],
+                "pos": m["pos"],
+                "own": 0.0 if own == "N/A" else float(own.rstrip("%")),
+                "score": float(score) if re.fullmatch(r"[\d.]+", score) else np.nan,
             }
-            for _, r in rows.iterrows()
-        ]
-    if export:
-        st.download_button(
-            "Download lineups CSV",
-            pd.DataFrame(export).to_csv(index=False),
-            "courtside_lineups.csv",
-            "text/csv",
         )
+    return pd.DataFrame(rows, columns=["name", "team", "pos", "own", "score"]), bad
+
+
+def parse_csv(f):
+    """CSV with columns Player, Pos, Team, Price, Own %, Score (Form ignored)."""
+    df = pd.read_csv(f, dtype=str, encoding="utf-8-sig")
+    df.columns = [c.strip().lower() for c in df.columns]
+    own = (
+        df["own %"]
+        .fillna("0")
+        .str.replace("%", "", regex=False)
+        .str.replace("N/A", "0")
+    )
+    return pd.DataFrame(
+        {
+            "name": df["player"].str.strip(),
+            "team": df["team"].str.strip().str.upper(),
+            "pos": df["pos"].str.strip().str.upper(),
+            "own": pd.to_numeric(own, errors="coerce").fillna(0.0),
+            "score": pd.to_numeric(df["score"], errors="coerce"),
+        }
+    ), 0
+
+
+def load_hist(f):
+    h = pd.read_csv(f, encoding="utf-8-sig")
+    for c in ["price", "proj", "prior_own", "own", "score"]:
+        h[c] = pd.to_numeric(h[c], errors="coerce")
+    h["slate"] = h["slate"].astype(str)
+    return h[HIST_COLS]
+
+
+def snapshot(pool, slate, hist):
+    """Save this slate's projections, statuses and prices, replacing any earlier save for the slate."""
+    rows = pd.DataFrame(
+        {
+            "slate": slate,
+            "key": (pool.key + "|" + pool.team).to_numpy(),
+            "name": pool.name.to_numpy(),
+            "team": pool.team.to_numpy(),
+            "pos": pool.pos.to_numpy(),
+            "price": pool.price.to_numpy(),
+            "proj": pool.proj.to_numpy(),
+            "status": pool.status.to_numpy(),
+            "prior_own": pool.own.to_numpy(),
+            "own": np.nan,
+            "score": np.nan,
+        }
+    )
+    kept = hist[hist.slate != slate] if len(hist) else hist
+    return pd.concat([kept, rows], ignore_index=True)
+
+
+def attach(hist, slate, field):
+    """Fill ownership and points for a saved slate. Anyone not in the table counts as 0%."""
+    if field.empty:
+        return hist, 0
+    f = (
+        field.assign(key=field.name.map(norm) + "|" + field.team)
+        .drop_duplicates("key")
+        .set_index("key")
+    )
+    mask = hist.slate == slate
+    keys = hist.loc[mask, "key"]
+    hist = hist.copy()
+    hist.loc[mask, "own"] = keys.map(f["own"]).fillna(0.0).to_numpy()
+    hist.loc[mask, "score"] = keys.map(f["score"]).to_numpy()
+    return hist, int(keys.isin(f.index).sum())
+
+
+def _design(df):
+    proj = np.asarray(df.proj, dtype=float)
+    price = np.asarray(df.price, dtype=float)
+    possible = (df.status == "possible").to_numpy(dtype=float)
+    return np.column_stack([np.ones(len(df)), proj, price, possible])
+
+
+def fit(hist):
+    """Log-linear ownership model on projection, price and possible status."""
+    h = hist.dropna(subset=["own", "proj", "price", "status"])
+    if len(h) < MIN_ROWS:
+        return None
+    y = np.log(np.asarray(h.own, dtype=float) + 0.5)
+    beta, *_ = np.linalg.lstsq(_design(h), y, rcond=None)
+    return beta
+
+
+def calibrated_own(pool, beta):
+    raw = np.exp(_design(pool) @ beta)
+    return np.minimum(700 * raw / raw.sum(), 100.0)
+
+
+def report(hist):
+    """Projection accuracy over saved slates where the player scored."""
+    h = hist.dropna(subset=["proj", "score"])
+    h = h[h.score > 0]
+    if h.empty:
+        return None
+    e = h.score - h.proj
+    return {
+        "rows": len(h),
+        "mae": float(e.abs().mean()),
+        "bias": float(e.mean()),
+        "rmse": float(np.sqrt((e**2).mean())),
+    }
+
+
+def play_rates(hist):
+    """Share of each lineup status that actually scored, from slates with ownership attached."""
+    h = hist[hist.own.notna()].copy()
+    if h.empty:
+        return pd.DataFrame()
+    h["played"] = h.score.fillna(0) > 0
+    return (
+        h.groupby("status")
+        .agg(players=("played", "size"), played_rate=("played", "mean"))
+        .round(2)
+    )
