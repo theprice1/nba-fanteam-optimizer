@@ -104,51 +104,57 @@ label, .stMarkdown p, .stCaption, [data-testid="stMetricLabel"], [data-testid="s
 
 
 def sync_daily_folders(hist, sharp):
-    """Auto-load date folders from data/daily/ into courtside_history.csv."""
+    """Lightweight check: only sync daily folders if they aren't already in history."""
     if not DAILY_DIR.exists():
         return hist
+
+    saved_slates = set(hist.slate.unique()) if not hist.empty else set()
     changed = False
+
     for folder in sorted(DAILY_DIR.iterdir()):
         if not folder.is_dir():
             continue
         slate = folder.name
+
+        # If this slate is already fully recorded in history, skip it completely!
+        if slate in saved_slates:
+            slate_rows = hist[hist.slate == slate]
+            if not slate_rows.empty and not slate_rows.own.isna().all():
+                continue
+
         fan_f = folder / "fanteam_list.csv"
         dft_f = folder / "projections.csv"
         own_f = folder / "ownership.csv"
 
-        slate_rows = hist[hist.slate == slate]
-
-        # 1. Snapshot projections if this slate date is not in history yet
-        if slate_rows.empty and fan_f.exists() and dft_f.exists():
+        # 1. Snapshot projections if missing
+        if slate not in saved_slates and fan_f.exists() and dft_f.exists():
             try:
                 with fan_f.open("rb") as f1, dft_f.open("rb") as f2:
                     day_pool = load_players(f1, f2, sharp)
                 hist = snapshot(day_pool, slate, hist)
-                slate_rows = hist[hist.slate == slate]
+                saved_slates.add(slate)
                 changed = True
-            except (KeyError, ValueError, FileNotFoundError) as e:
-                st.warning(f"Could not auto-load projections for {slate}: {e}")
+            except (KeyError, ValueError, FileNotFoundError):
                 continue
 
-        # 2. Attach ownership if ownership.csv exists and hasn't been attached yet
+        # 2. Attach ownership if missing
+        slate_rows = hist[hist.slate == slate]
         if not slate_rows.empty and slate_rows.own.isna().all() and own_f.exists():
             try:
                 with own_f.open("rb") as f3:
                     field, _ = parse_csv(f3)
-                problems = validate_field(field)
-                if not problems:
+                if not validate_field(field):
                     hist, _ = attach(hist, slate, field)
                     changed = True
-                else:
-                    st.warning(f"Skipped {slate} ownership.csv: {'; '.join(problems)}")
-            except (KeyError, ValueError, FileNotFoundError) as e:
-                st.warning(f"Could not auto-attach ownership for {slate}: {e}")
+            except (KeyError, ValueError, FileNotFoundError):
+                continue
 
     if changed:
         try:
             save_hist(hist, HIST_PATH)
-        except OSError:
+        except (OSError, PermissionError):
             pass
+
     return hist
 
 
