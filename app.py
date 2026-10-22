@@ -57,10 +57,39 @@ h1,h2,h3{font-family:'Barlow Condensed',sans-serif;text-transform:uppercase;lett
 .nums{display:flex;justify-content:space-between;font-family:'Barlow Condensed';font-size:1.02rem;color:var(--muted)}
 .nums b{color:var(--ink)}
 
-/* Fix mobile contrast and label visibility */
-.stFileUploader label, .stDateInput label, .stSelectbox label, .stTextArea label, .stTextInput label, .stRadio label, .stMultiSelect label {
+/* --- High Contrast Mobile & Dark Theme Fixes --- */
+/* Force all widget labels, captions, and text to bright ink */
+label, .stMarkdown p, .stCaption, [data-testid="stMetricLabel"], [data-testid="stText"] {
     color: var(--ink) !important;
-    font-weight: 600 !important;
+}
+[data-testid="stMetricValue"] {
+    color: var(--orange) !important;
+    font-family: 'Barlow Condensed', sans-serif !important;
+}
+/* Style Streamlit containers / borders to match theme panels */
+[data-testid="stVerticalBlock"] > [data-testid="stContainer"] {
+    background-color: var(--panel);
+    border: 1px solid #ffffff14;
+    border-radius: 18px;
+    padding: 16px;
+}
+/* Style file uploaders and inputs for high visibility */
+[data-testid="stFileUploader"] {
+    background-color: var(--navy);
+    border: 1px solid #ffffff22;
+    border-radius: 12px;
+    padding: 12px;
+}
+[data-testid="stFileUploader"] section {
+    background-color: var(--panel) !important;
+}
+/* Primary buttons */
+.stButton button[kind="primary"], button[kind="primary"] {
+    background-color: var(--orange) !important;
+    color: var(--navy) !important;
+    font-family: 'Barlow Condensed', sans-serif !important;
+    font-weight: 800 !important;
+    border-radius: 12px !important;
 }
 
 /* Mobile Responsiveness Tweaks */
