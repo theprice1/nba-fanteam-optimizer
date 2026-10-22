@@ -34,6 +34,7 @@ from ownership import (
 )
 
 HIST_PATH = Path(__file__).parent / "data" / "courtside_history.csv"
+DAILY_DIR = Path(__file__).parent / "data" / "daily"
 
 CSS = """
 @import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;800&family=Barlow:wght@400;600&display=swap');
@@ -56,6 +57,55 @@ h1,h2,h3{font-family:'Barlow Condensed',sans-serif;text-transform:uppercase;lett
 .nums{display:flex;justify-content:space-between;font-family:'Barlow Condensed';font-size:1.02rem;color:var(--muted)}
 .nums b{color:var(--ink)}
 """
+
+
+def sync_daily_folders(hist, sharp):
+    """Auto-load date folders from data/daily/ into courtside_history.csv."""
+    if not DAILY_DIR.exists():
+        return hist
+    changed = False
+    for folder in sorted(DAILY_DIR.iterdir()):
+        if not folder.is_dir():
+            continue
+        slate = folder.name
+        fan_f = folder / "fanteam_list.csv"
+        dft_f = folder / "projections.csv"
+        own_f = folder / "ownership.csv"
+
+        slate_rows = hist[hist.slate == slate]
+
+        # 1. Snapshot projections if this slate date is not in history yet
+        if slate_rows.empty and fan_f.exists() and dft_f.exists():
+            try:
+                with fan_f.open("rb") as f1, dft_f.open("rb") as f2:
+                    day_pool = load_players(f1, f2, sharp)
+                hist = snapshot(day_pool, slate, hist)
+                slate_rows = hist[hist.slate == slate]
+                changed = True
+            except (KeyError, ValueError, FileNotFoundError) as e:
+                st.warning(f"Could not auto-load projections for {slate}: {e}")
+                continue
+
+        # 2. Attach ownership if ownership.csv exists and hasn't been attached yet
+        if not slate_rows.empty and slate_rows.own.isna().all() and own_f.exists():
+            try:
+                with own_f.open("rb") as f3:
+                    field, _ = parse_csv(f3)
+                problems = validate_field(field)
+                if not problems:
+                    hist, _ = attach(hist, slate, field)
+                    changed = True
+                else:
+                    st.warning(f"Skipped {slate} ownership.csv: {'; '.join(problems)}")
+            except (KeyError, ValueError, FileNotFoundError) as e:
+                st.warning(f"Could not auto-attach ownership for {slate}: {e}")
+
+    if changed:
+        try:
+            save_hist(hist, HIST_PATH)
+        except OSError:
+            pass
+    return hist
 
 
 def lineup_card(num, rows, s, main):
@@ -113,9 +163,10 @@ else:
     )
 
 if "hist" not in st.session_state:
-    st.session_state.hist = (
+    base_hist = (
         load_hist(HIST_PATH) if HIST_PATH.exists() else pd.DataFrame(columns=HIST_COLS)
     )
+    st.session_state.hist = sync_daily_folders(base_hist, sharp)
 
 # ---- Ownership & history: always visible --------------------------------------------
 with st.container(border=True):
