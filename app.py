@@ -1,4 +1,5 @@
 from datetime import date
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -26,9 +27,12 @@ from ownership import (
     parse_paste,
     play_rates,
     report,
+    save_hist,
     slate_summary,
     snapshot,
 )
+
+HIST_PATH = Path(__file__).parent / "data" / "courtside_history.csv"
 
 CSS = """
 @import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;800&family=Barlow:wght@400;600&display=swap');
@@ -108,7 +112,9 @@ else:
     )
 
 if "hist" not in st.session_state:
-    st.session_state.hist = pd.DataFrame(columns=HIST_COLS)
+    st.session_state.hist = (
+        load_hist(HIST_PATH) if HIST_PATH.exists() else pd.DataFrame(columns=HIST_COLS)
+    )
 
 # ---- Ownership & history: always visible --------------------------------------------
 with st.container(border=True):
@@ -120,6 +126,7 @@ with st.container(border=True):
     ):
         st.session_state.hist = load_hist(h_up)
         st.session_state.hist_src = f"{h_up.name}-{h_up.size}"
+        save_hist(st.session_state.hist, HIST_PATH)
 
     left, right = st.columns(2)
     with left:
@@ -127,6 +134,7 @@ with st.container(border=True):
         slate = st.date_input("Slate date", value=date.today()).isoformat()
         if st.button("Save projections", disabled=pool is None):
             st.session_state.hist = snapshot(pool, slate, st.session_state.hist)
+            save_hist(st.session_state.hist, HIST_PATH)
             st.success(f"Saved {len(pool)} players for {slate}.")
     with right:
         st.markdown("**Attach ownership to a saved slate**")
@@ -153,11 +161,17 @@ with st.container(border=True):
                 st.session_state.hist, matched = attach(
                     st.session_state.hist, target, field
                 )
+                save_hist(st.session_state.hist, HIST_PATH)
                 total = field.own.sum()
                 st.success(
                     f"Attached {len(field)} players to {target}; {matched} matched. "
                     f"Ownership sums to {total:.0f}%."
                 )
+                if matched < len(field):
+                    st.warning(
+                        f"{len(field) - matched} ownership rows did not match a player on this slate. "
+                        "Check the slate date and the file."
+                    )
                 if abs(total - 700) > 10:
                     st.warning(
                         "Ownership should sum to about 700%. Check for missing rows."
@@ -177,6 +191,15 @@ with st.container(border=True):
         "The ownership model calibrates after 3 saved slates with ownership attached."
     )
 
+    with st.expander("Wipe history"):
+        st.caption(
+            "Deletes every saved slate, projection and ownership figure from this app. Use it only to start again."
+        )
+        if st.checkbox("I understand this deletes all saved history", key="wipe_ok"):
+            if st.button("Wipe history now"):
+                HIST_PATH.unlink(missing_ok=True)
+                st.session_state.hist = pd.DataFrame(columns=HIST_COLS)
+                st.rerun()
     history_tab, detail_tab = st.tabs(["Slate history", "Slate detail"])
     with history_tab:
         summary = slate_summary(hist)

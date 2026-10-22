@@ -1,6 +1,7 @@
 """Courtside ownership: parse field ownership, keep a daily history, calibrate from it."""
 
 import re
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -108,8 +109,21 @@ def snapshot(pool, slate, hist):
             "score": np.nan,
         }
     )
+    # Keep any ownership and points already attached to this slate, so re-saving projections
+    # never wipes the true ownership.
+    old = hist[hist.slate == slate] if len(hist) else hist
+    if len(old):
+        prev = old.drop_duplicates("key").set_index("key")
+        rows["own"] = rows["key"].map(prev["own"]).to_numpy()
+        rows["score"] = rows["key"].map(prev["score"]).to_numpy()
     kept = hist[hist.slate != slate] if len(hist) else hist
     return _num(pd.concat([kept, rows], ignore_index=True))
+
+
+def save_hist(hist, path):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    hist[HIST_COLS].to_csv(path, index=False)
 
 
 def attach(hist, slate, field):
@@ -180,21 +194,37 @@ def play_rates(hist):
 
 
 def slate_summary(hist):
-    """One row per saved slate: players, ownership coverage, and projection error."""
+    """One row per saved slate: coverage, projection error, and how far the prior ownership was."""
     rows = []
     for slate, h in hist.groupby("slate"):
         scored = h.dropna(subset=["proj", "score"])
         scored = scored[scored.score > 0]
         e = scored.score - scored.proj
+        both = h.dropna(subset=["prior_own", "own"])
         rows.append(
             {
                 "slate": slate,
                 "players": len(h),
+                "projections": int(h.proj.notna().sum()),
                 "ownership_attached": int(h.own.notna().sum()),
                 "mae": round(float(e.abs().mean()), 2) if len(e) else np.nan,
                 "bias": round(float(e.mean()), 2) if len(e) else np.nan,
+                "prior_own_error": round(
+                    float((both.prior_own - both.own).abs().mean()), 2
+                )
+                if len(both)
+                else np.nan,
             }
         )
     return pd.DataFrame(
-        rows, columns=["slate", "players", "ownership_attached", "mae", "bias"]
+        rows,
+        columns=[
+            "slate",
+            "players",
+            "projections",
+            "ownership_attached",
+            "mae",
+            "bias",
+            "prior_own_error",
+        ],
     )
