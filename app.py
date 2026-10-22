@@ -56,6 +56,15 @@ h1,h2,h3{font-family:'Barlow Condensed',sans-serif;text-transform:uppercase;lett
 .nm{font-weight:600;margin:2px 0 6px}
 .nums{display:flex;justify-content:space-between;font-family:'Barlow Condensed';font-size:1.02rem;color:var(--muted)}
 .nums b{color:var(--ink)}
+
+/* Mobile Responsiveness Tweaks */
+@media (max-width: 768px) {
+    .hero { padding: 14px 18px; }
+    .hero h1 { font-size: 2rem; }
+    .card { padding: 12px 14px; }
+    .grid { grid-template-columns: 1fr; }
+    .stats { flex-direction: column; gap: 4px; }
+}
 """
 
 
