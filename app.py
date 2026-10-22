@@ -57,6 +57,12 @@ h1,h2,h3{font-family:'Barlow Condensed',sans-serif;text-transform:uppercase;lett
 .nums{display:flex;justify-content:space-between;font-family:'Barlow Condensed';font-size:1.02rem;color:var(--muted)}
 .nums b{color:var(--ink)}
 
+/* Fix mobile contrast and label visibility */
+.stFileUploader label, .stDateInput label, .stSelectbox label, .stTextArea label, .stTextInput label, .stRadio label, .stMultiSelect label {
+    color: var(--ink) !important;
+    font-weight: 600 !important;
+}
+
 /* Mobile Responsiveness Tweaks */
 @media (max-width: 768px) {
     .hero { padding: 14px 18px; }
