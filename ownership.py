@@ -63,23 +63,38 @@ def parse_paste(text):
     return pd.DataFrame(rows, columns=["name", "team", "pos", "own", "score"]), bad
 
 
+def _find(df, names, label):
+    """Find a column by a forgiving match: 'Own %', 'Own%' and 'own' all count as own."""
+    keys = {re.sub(r"[^a-z0-9]", "", c.lower()): c for c in df.columns}
+    for n in names:
+        if n in keys:
+            return keys[n]
+    raise ValueError(
+        f"The ownership file needs a {label} column. "
+        f"Columns found: {', '.join(df.columns)}"
+    )
+
+
 def parse_csv(f):
-    """CSV with columns Player, Pos, Team, Price, Own %, Score (Form ignored)."""
+    """CSV with Player, Team, Pos, Price, Own %, Score. Header spelling is forgiving."""
     df = pd.read_csv(f, dtype=str, encoding="utf-8-sig")
-    df.columns = [c.strip().lower() for c in df.columns]
+    df.columns = [c.strip() for c in df.columns]
+    name_c = _find(df, ["player", "name"], "Player")
+    team_c = _find(df, ["team", "club"], "Team")
+    own_c = _find(df, ["own", "ownpct", "ownership"], "Own %")
+    score_c = _find(df, ["score", "points"], "Score")
     own = (
-        df["own %"]
+        df[own_c]
         .fillna("0")
         .str.replace("%", "", regex=False)
-        .str.replace("N/A", "0")
+        .str.replace("N/A", "0", regex=False)
     )
     return pd.DataFrame(
         {
-            "name": df["player"].str.strip(),
-            "team": df["team"].str.strip().str.upper(),
-            "pos": df["pos"].str.strip().str.upper(),
+            "name": df[name_c].str.strip(),
+            "team": df[team_c].str.strip().str.upper(),
             "own": pd.to_numeric(own, errors="coerce").fillna(0.0),
-            "score": pd.to_numeric(df["score"], errors="coerce"),
+            "score": pd.to_numeric(df[score_c], errors="coerce"),
         }
     ), 0
 

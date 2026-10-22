@@ -152,7 +152,11 @@ with st.container(border=True):
             if paste.strip():
                 field, bad = parse_paste(paste)
             elif own_csv is not None:
-                field, bad = parse_csv(own_csv)
+                try:
+                    field, bad = parse_csv(own_csv)
+                except (KeyError, ValueError) as e:
+                    st.error(str(e))
+                    field, bad = None, 0
             else:
                 field, bad = None, 0
             if field is None or field.empty:
@@ -195,11 +199,13 @@ with st.container(border=True):
         st.caption(
             "Deletes every saved slate, projection and ownership figure from this app. Use it only to start again."
         )
-        if st.checkbox("I understand this deletes all saved history", key="wipe_ok"):
-            if st.button("Wipe history now"):
-                HIST_PATH.unlink(missing_ok=True)
-                st.session_state.hist = pd.DataFrame(columns=HIST_COLS)
-                st.rerun()
+        wipe_ok = st.checkbox(
+            "I understand this deletes all saved history", key="wipe_ok"
+        )
+        if wipe_ok and st.button("Wipe history now"):
+            HIST_PATH.unlink(missing_ok=True)
+            st.session_state.hist = pd.DataFrame(columns=HIST_COLS)
+            st.rerun()
     history_tab, detail_tab = st.tabs(["Slate history", "Slate detail"])
     with history_tab:
         summary = slate_summary(hist)
