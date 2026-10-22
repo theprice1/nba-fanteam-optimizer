@@ -30,6 +30,7 @@ from ownership import (
     save_hist,
     slate_summary,
     snapshot,
+    validate_field,
 )
 
 HIST_PATH = Path(__file__).parent / "data" / "courtside_history.csv"
@@ -159,8 +160,15 @@ with st.container(border=True):
                     field, bad = None, 0
             else:
                 field, bad = None, 0
+            problems = (
+                validate_field(field) if field is not None and not field.empty else []
+            )
             if field is None or field.empty:
                 st.warning("Paste the table or upload a CSV first.")
+            elif problems:
+                for problem in problems:
+                    st.error(problem)
+                st.caption("Nothing was attached.")
             else:
                 st.session_state.hist, matched = attach(
                     st.session_state.hist, target, field

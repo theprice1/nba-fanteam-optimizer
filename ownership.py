@@ -79,6 +79,11 @@ def parse_csv(f):
     """CSV with Player, Team, Pos, Price, Own %, Score. Header spelling is forgiving."""
     df = pd.read_csv(f, dtype=str, encoding="utf-8-sig")
     df.columns = [c.strip() for c in df.columns]
+    if {c.lower() for c in df.columns} & {"slate", "key", "prior_own"}:
+        raise ValueError(
+            "This looks like a saved history file, not an ownership file. "
+            "Use the ownership.csv from the daily folder for that date."
+        )
     name_c = _find(df, ["player", "name"], "Player")
     team_c = _find(df, ["team", "club"], "Team")
     own_c = _find(df, ["own", "ownpct", "ownership"], "Own %")
@@ -97,6 +102,23 @@ def parse_csv(f):
             "score": pd.to_numeric(df[score_c], errors="coerce"),
         }
     ), 0
+
+
+def validate_field(field):
+    """Problems that should stop an ownership file being attached. An empty list means it is fine."""
+    problems = []
+    total = float(field.own.sum())
+    if not 650 <= total <= 750:
+        problems.append(
+            f"Ownership adds up to {total:.0f}%, but it should be about 700%. "
+            "The file may be the wrong one or incomplete."
+        )
+    key = field.name.map(norm) + "|" + field.team
+    if key.duplicated().any():
+        problems.append(
+            "The file lists some players twice. Check it is the ownership table for one slate."
+        )
+    return problems
 
 
 def load_hist(f):
