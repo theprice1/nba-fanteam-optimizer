@@ -1,4 +1,5 @@
 """Courtside core: load Fanteam and projection data, value players, solve lineups."""
+
 import re
 import unicodedata
 from collections import Counter
@@ -8,18 +9,48 @@ import pandas as pd
 import pulp
 
 SLOTS = ["PG", "SG", "SF", "PF", "C"]
-POS_MAP = {"guard_point": "PG", "guard_shooting": "SG", "forward_small": "SF",
-           "forward_power": "PF", "center": "C"}
-AVAIL = {"confirmed": 1.0, "expected": 1.0, "possible": 0.75, "bench": 0.45,
-         "unexpected": 0.10, "injured": 0.0, "refuted": 0.0}
-TEAM_ALIAS = {"SAS": "SA", "NOR": "NOP", "NO": "NOP", "GS": "GSW", "PHX": "PHO",
-              "UTAH": "UTA", "BRK": "BKN", "WSH": "WAS", "CHO": "CHA"}
+POS_MAP = {
+    "guard_point": "PG",
+    "guard_shooting": "SG",
+    "forward_small": "SF",
+    "forward_power": "PF",
+    "center": "C",
+}
+AVAIL = {
+    "confirmed": 1.0,
+    "expected": 1.0,
+    "possible": 0.75,
+    "bench": 0.45,
+    "unexpected": 0.10,
+    "injured": 0.0,
+    "refuted": 0.0,
+}
+TEAM_ALIAS = {
+    "SAS": "SA",
+    "NOR": "NOP",
+    "NO": "NOP",
+    "GS": "GSW",
+    "PHX": "PHO",
+    "UTAH": "UTA",
+    "BRK": "BKN",
+    "WSH": "WAS",
+    "CHO": "CHA",
+}
 STACK_MIN = 2
 MODE_CASH = ("Cash", "Pure projection")
 # Auto rotates stack type and ownership penalty so the set covers different builds.
-SCHEDULE = [("team", .10), ("bring-back", .10), ("none", .15), ("team", .05),
-            ("bring-back", .15), ("none", .05), ("team", .10), ("bring-back", .05),
-            ("none", .10), ("team", .15)]
+SCHEDULE = [
+    ("team", 0.10),
+    ("bring-back", 0.10),
+    ("none", 0.15),
+    ("team", 0.05),
+    ("bring-back", 0.15),
+    ("none", 0.05),
+    ("team", 0.10),
+    ("bring-back", 0.05),
+    ("none", 0.10),
+    ("team", 0.15),
+]
 
 
 def norm(s):
@@ -46,7 +77,10 @@ def _col(df, *names):
 
 def _best_mate(pool, pid, team, pos):
     """Best projection among available same-team, same-position teammates."""
-    m = pool.loc[(pool.team == team) & (pool.pos == pos) & (pool.pid != pid) & (pool.p > 0), "proj"]
+    m = pool.loc[
+        (pool.team == team) & (pool.pos == pos) & (pool.pid != pid) & (pool.p > 0),
+        "proj",
+    ]
     return float(m.max()) if m.notna().any() else 0.0
 
 
@@ -54,14 +88,16 @@ def load_players(fan_file, dft_file, sharpness):
     """Fanteam list is the authority for ID, position, price and availability.
     Projections come from the Daily Fantasy Tips CSV, matched by Fanteam ID or name."""
     fp = _read(fan_file)
-    pool = pd.DataFrame({
-        "pid": fp["PlayerID"].str.strip(),
-        "name": fp["FName"].str.strip() + " " + fp["Name"].str.strip(),
-        "team": fp["Club"].map(team_code),
-        "pos": fp["Position"].str.strip().map(POS_MAP),
-        "status": fp["Lineup"].str.strip().str.lower(),
-        "price": pd.to_numeric(fp["Price"], errors="coerce"),
-    })
+    pool = pd.DataFrame(
+        {
+            "pid": fp["PlayerID"].str.strip(),
+            "name": fp["FName"].str.strip() + " " + fp["Name"].str.strip(),
+            "team": fp["Club"].map(team_code),
+            "pos": fp["Position"].str.strip().map(POS_MAP),
+            "status": fp["Lineup"].str.strip().str.lower(),
+            "price": pd.to_numeric(fp["Price"], errors="coerce"),
+        }
+    )
     pool["key"] = pool["name"].map(norm)
     pool["p"] = pool["status"].map(AVAIL).fillna(0.0)
     pool["proj"] = np.nan
@@ -82,13 +118,21 @@ def load_players(fan_file, dft_file, sharpness):
         byname = dp.drop_duplicates("_key").set_index("_key")["_proj"]
         pool["proj"] = pool["proj"].fillna(pool["key"].map(byname))
     if tc and oc:
-        opp = {team_code(t): team_code(o) for t, o in zip(dp[tc], dp[oc]) if isinstance(o, str)}
+        opp = {
+            team_code(t): team_code(o)
+            for t, o in zip(dp[tc], dp[oc])
+            if isinstance(o, str)
+        }
         pool["opp"] = pool["team"].map(opp)
 
     # Safety net: if a player is out, the best healthy teammate at his position takes his minutes.
-    pool["safety"] = [_best_mate(pool, i, t, s) for i, t, s in zip(pool.pid, pool.team, pool.pos)]
+    pool["safety"] = [
+        _best_mate(pool, i, t, s) for i, t, s in zip(pool.pid, pool.team, pool.pos)
+    ]
     pool["ev"] = pool.p * pool.proj + (1 - pool.p) * pool.safety
-    pool = pool[(pool.p > 0) & pool.proj.notna() & pool.price.notna() & pool.pos.notna()].copy()
+    pool = pool[
+        (pool.p > 0) & pool.proj.notna() & pool.price.notna() & pool.pos.notna()
+    ].copy()
 
     # Projected ownership prior (sums to 700% = 7 slots x 100%); replace with history later.
     raw = np.exp(sharpness * pool.proj.clip(lower=0)) * pool.p
@@ -120,7 +164,8 @@ def solve_one(pool, value, budget, stack, max_team, overlap, prior, locked, opp_
     for members in by_team.values():
         prob += pulp.lpSum(x[i] for i in members) <= max_team
     for old in prior:
-        prob += pulp.lpSum(x[i] for i in old) <= overlap
+        # Players capped by the exposure rule are not in this pool, so only count the ones that are.
+        prob += pulp.lpSum(x[i] for i in old if i in x) <= overlap
     for i in locked:
         if i in x:
             prob += x[i] == 1
@@ -138,7 +183,9 @@ def solve_one(pool, value, budget, stack, max_team, overlap, prior, locked, opp_
     return [i for i in ids if x[i].value() > 0.5]
 
 
-def build_set(pool, budget, mode, n, stack, lam, max_team, overlap, locked, banned, opp_of):
+def build_set(
+    pool, budget, mode, n, stack, lam, max_team, overlap, locked, banned, opp_of
+):
     """Greedy diverse set: each lineup shares at most `overlap` players with every earlier one,
     and no player appears in more than 60% of lineups (locked players are exempt)."""
     prior, out, counts = [], [], Counter()
@@ -149,7 +196,9 @@ def build_set(pool, budget, mode, n, stack, lam, max_team, overlap, locked, bann
         st, l = SCHEDULE[k % len(SCHEDULE)] if auto else (stack, lam)
         capped = {i for i, c in counts.items() if c >= cap and i not in locked}
         p = base[~base.pid.isin(capped)]
-        ids = solve_one(p, _value(p, mode, l), budget, st, max_team, overlap, prior, locked, opp_of)
+        ids = solve_one(
+            p, _value(p, mode, l), budget, st, max_team, overlap, prior, locked, opp_of
+        )
         if ids is None:
             break
         prior.append(ids)
@@ -162,5 +211,10 @@ def summarise(pool, ids, stack):
     rows = pool[pool.pid.isin(ids)].sort_values(["pos", "ev"], ascending=[True, False])
     counts = rows.team.value_counts()
     team = counts.index[0] if counts.iloc[0] >= STACK_MIN else "—"
-    return rows, {"cost": rows.price.sum(), "ev": rows.ev.sum(), "own": rows.own.sum(),
-                  "stack": stack, "team": team}
+    return rows, {
+        "cost": rows.price.sum(),
+        "ev": rows.ev.sum(),
+        "own": rows.own.sum(),
+        "stack": stack,
+        "team": team,
+    }
