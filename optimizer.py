@@ -64,7 +64,8 @@ def team_code(s):
 
 
 def _read(f):
-    f.seek(0)
+    if hasattr(f, "seek"):
+        f.seek(0)
     df = pd.read_csv(f, dtype=str, encoding="utf-8-sig")
     df.columns = [c.strip() for c in df.columns]
     return df
@@ -88,8 +89,12 @@ def load_players(fan_file, dft_file, sharpness):
     """Fanteam list is the authority for ID, position, price and availability.
     Projections come from the Daily Fantasy Tips CSV, matched by Fanteam ID or name."""
     fp = _read(fan_file)
+    tc_id = _col(fp, "tournament", "tournamentid", "tournament_id")
+    tid_series = fp[tc_id].str.strip() if tc_id else ""
+
     pool = pd.DataFrame(
         {
+            "tid": tid_series,
             "pid": fp["PlayerID"].str.strip(),
             "name": fp["FName"].str.strip() + " " + fp["Name"].str.strip(),
             "team": fp["Club"].map(team_code),
@@ -218,3 +223,34 @@ def summarise(pool, ids, stack):
         "stack": stack,
         "team": team,
     }
+
+
+def to_fanteam_csv(pool, out, tournament_id=None):
+    """Format solved lineups for FanTeam's Beta CSV uploader.
+    Format per line: TournamentID,player1ID,player2ID,player3ID,player4ID,player5ID,player6ID,player7ID
+    No header row, no spaces after commas, no trailing comma, and no trailing newline."""
+    tid = str(tournament_id).strip() if tournament_id else ""
+    if not tid and "tid" in pool.columns and not pool["tid"].empty:
+        tid = str(pool["tid"].iloc[0]).strip()
+    if not tid:
+        raise ValueError("Tournament ID is required for FanTeam CSV upload.")
+
+    slot_rank = {s: idx for idx, s in enumerate(SLOTS)}
+    lines = []
+    for item in out:
+        ids = item[0] if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], (list, set, tuple)) else item
+        rows = pool[pool.pid.isin(ids)].copy()
+        rows["_slot"] = rows["pos"].map(slot_rank).fillna(99)
+        rows = rows.sort_values(["_slot", "ev"], ascending=[True, False])
+        ordered_ids = [str(pid).strip() for pid in rows["pid"].tolist()]
+        lines.append(f"{tid}," + ",".join(ordered_ids))
+
+    return "\n".join(lines)
+
+
+def export_fanteam_csv(pool, out, tournament_id=None, filename="fanteam_upload.csv"):
+    """Write the FanTeam bulk-upload CSV directly to disk and return the formatted string."""
+    csv_text = to_fanteam_csv(pool, out, tournament_id=tournament_id)
+    with open(filename, "w", encoding="utf-8", newline="") as f:
+        f.write(csv_text)
+    return csv_text
