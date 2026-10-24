@@ -16,7 +16,7 @@ from intel import (
     top_owned,
     value_board,
 )
-from optimizer import build_set, load_players, summarise
+from optimizer import build_set, load_players, summarise, to_fanteam_csv
 from ownership import (
     HIST_COLS,
     attach,
@@ -390,6 +390,16 @@ if pool is not None:
 
     # ---- Build lineups -----------------------------------------------------------------
     st.subheader("Build lineups")
+    default_tid = (
+        str(pool["tid"].iloc[0]).strip()
+        if "tid" in pool.columns and not pool["tid"].empty
+        else ""
+    )
+    tid = st.text_input(
+        "Tournament ID (auto-filled from Fanteam CSV; change if entering another contest on the same slate)",
+        value=default_tid,
+    ).strip()
+
     names = sorted(pool["name"])
     ex = st.multiselect("Exclude", names)
     lk = st.multiselect("Lock in", names)
@@ -418,27 +428,19 @@ if pool is not None:
             )
         if not sets:
             st.error("No feasible lineup. Loosen the budget, team cap or locks.")
-        export = []
-        for num, (ids, kind) in enumerate(sets, 1):
-            rows, s = summarise(pool, ids, kind)
-            st.markdown(
-                lineup_card(num, rows, s, auto and num <= 3), unsafe_allow_html=True
-            )
-            export += [
-                {
-                    "lineup": num,
-                    "fanteam_id": r.pid,
-                    "player": r["name"],
-                    "pos": r.pos,
-                    "team": r.team,
-                    "price": r.price,
-                }
-                for _, r in rows.iterrows()
-            ]
-        if export:
-            st.download_button(
-                "Download lineups CSV",
-                pd.DataFrame(export).to_csv(index=False),
-                "courtside_lineups.csv",
-                "text/csv",
-            )
+        else:
+            for num, (ids, kind) in enumerate(sets, 1):
+                rows, s = summarise(pool, ids, kind)
+                st.markdown(
+                    lineup_card(num, rows, s, auto and num <= 3), unsafe_allow_html=True
+                )
+            try:
+                fanteam_csv = to_fanteam_csv(pool, sets, tournament_id=tid)
+                st.download_button(
+                    "Download Fanteam upload CSV",
+                    fanteam_csv,
+                    "courtside_lineups.csv",
+                    "text/csv",
+                )
+            except ValueError as e:
+                st.warning(str(e))
