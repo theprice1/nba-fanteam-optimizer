@@ -1,3 +1,4 @@
+from collections import Counter
 from datetime import date
 from pathlib import Path
 
@@ -38,7 +39,7 @@ DAILY_DIR = Path(__file__).parent / "data" / "daily"
 
 CSS = """
 @import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;800&family=Barlow:wght@400;600&display=swap');
-:root{--navy:#0b1426;--panel:#121d33;--blue:#1d428a;--orange:#ff7a18;--ink:#eef2fb;--muted:#8a97b5}
+:root{--navy:#0b1426;--panel:#121d33;--blue:#1d428a;--orange:#ff7a18;--green:#10b981;--cyan:#38bdf8;--ink:#eef2fb;--muted:#8a97b5}
 .stApp{background:radial-gradient(1100px 520px at 0% -10%,#1d428a66,transparent),linear-gradient(180deg,#070d1b,#0b1426);color:var(--ink);font-family:Barlow,sans-serif}
 h1,h2,h3{font-family:'Barlow Condensed',sans-serif;text-transform:uppercase;letter-spacing:.04em}
 .hero{background:linear-gradient(120deg,var(--blue),#0b1426 65%);border:1px solid #ffffff14;border-left:6px solid var(--orange);border-radius:18px;padding:20px 26px;margin-bottom:18px}
@@ -50,15 +51,23 @@ h1,h2,h3{font-family:'Barlow Condensed',sans-serif;text-transform:uppercase;lett
 .tag{font-family:'Barlow Condensed';font-weight:800;color:var(--navy);background:var(--orange);border-radius:999px;padding:2px 12px;margin-right:8px}
 .stats{display:flex;gap:16px;color:var(--muted);font-size:.9rem}
 .stats b{color:var(--ink);font-family:'Barlow Condensed';font-size:1.15rem}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px}
-.pl{background:var(--navy);border:1px solid #ffffff18;border-radius:14px;padding:10px 12px;border-top:3px solid var(--blue)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(185px,1fr));gap:10px}
+.pl{background:var(--navy);border:1px solid #ffffff18;border-radius:14px;padding:10px 12px;border-top:3px solid var(--blue);transition:transform .12s ease,border-color .12s ease}
+.pl:hover{transform:translateY(-2px);border-color:#ffffff38}
+.pl-chalk{border-top-color:var(--orange)}
+.pl-lev{border-top-color:var(--green)}
+.pl-val{border-top-color:var(--cyan)}
+.pos-row{display:flex;justify-content:space-between;align-items:center}
 .pos{font-family:'Barlow Condensed';font-weight:800;color:var(--orange);font-size:.85rem;letter-spacing:.06em}
-.nm{font-weight:600;margin:2px 0 6px}
+.pill{font-family:'Barlow Condensed';font-weight:800;font-size:.72rem;letter-spacing:.05em;padding:1px 7px;border-radius:999px;text-transform:uppercase}
+.pill-chalk{background:#ff7a1826;color:var(--orange);border:1px solid #ff7a1866}
+.pill-lev{background:#10b98126;color:var(--green);border:1px solid #10b98166}
+.pill-val{background:#38bdf826;color:var(--cyan);border:1px solid #38bdf866}
+.nm{font-weight:600;margin:3px 0 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .nums{display:flex;justify-content:space-between;font-family:'Barlow Condensed';font-size:1.02rem;color:var(--muted)}
 .nums b{color:var(--ink)}
 
 /* --- High Contrast Mobile & Dark Theme Fixes --- */
-/* Force all widget labels, captions, and text to bright ink */
 label, .stMarkdown p, .stCaption, [data-testid="stMetricLabel"], [data-testid="stText"] {
     color: var(--ink) !important;
 }
@@ -66,14 +75,12 @@ label, .stMarkdown p, .stCaption, [data-testid="stMetricLabel"], [data-testid="s
     color: var(--orange) !important;
     font-family: 'Barlow Condensed', sans-serif !important;
 }
-/* Style Streamlit containers / borders to match theme panels */
 [data-testid="stVerticalBlock"] > [data-testid="stContainer"] {
     background-color: var(--panel);
     border: 1px solid #ffffff14;
     border-radius: 18px;
     padding: 16px;
 }
-/* Style file uploaders and inputs for high visibility */
 [data-testid="stFileUploader"] {
     background-color: var(--navy);
     border: 1px solid #ffffff22;
@@ -83,7 +90,6 @@ label, .stMarkdown p, .stCaption, [data-testid="stMetricLabel"], [data-testid="s
 [data-testid="stFileUploader"] section {
     background-color: var(--panel) !important;
 }
-/* Primary buttons */
 .stButton button[kind="primary"], button[kind="primary"] {
     background-color: var(--orange) !important;
     color: var(--navy) !important;
@@ -92,7 +98,6 @@ label, .stMarkdown p, .stCaption, [data-testid="stMetricLabel"], [data-testid="s
     border-radius: 12px !important;
 }
 
-/* Mobile Responsiveness Tweaks */
 @media (max-width: 768px) {
     .hero { padding: 14px 18px; }
     .hero h1 { font-size: 2rem; }
@@ -116,7 +121,6 @@ def sync_daily_folders(hist, sharp):
             continue
         slate = folder.name
 
-        # If this slate is already fully recorded in history, skip it completely!
         if slate in saved_slates:
             slate_rows = hist[hist.slate == slate]
             if not slate_rows.empty and not slate_rows.own.isna().all():
@@ -126,7 +130,6 @@ def sync_daily_folders(hist, sharp):
         dft_f = folder / "projections.csv"
         own_f = folder / "ownership.csv"
 
-        # 1. Snapshot projections if missing
         if slate not in saved_slates and fan_f.exists() and dft_f.exists():
             try:
                 with fan_f.open("rb") as f1, dft_f.open("rb") as f2:
@@ -137,7 +140,6 @@ def sync_daily_folders(hist, sharp):
             except (KeyError, ValueError, FileNotFoundError):
                 continue
 
-        # 2. Attach ownership if missing
         slate_rows = hist[hist.slate == slate]
         if not slate_rows.empty and slate_rows.own.isna().all() and own_f.exists():
             try:
@@ -158,22 +160,71 @@ def sync_daily_folders(hist, sharp):
     return hist
 
 
+def _player_badge(r):
+    val = r["ev"] / max(r["price"], 4.0)
+    if r["own"] >= 28.0:
+        return "pl-chalk", '<span class="pill pill-chalk">CHALK</span>'
+    if r["ev"] >= 32.0 and r["own"] <= 14.0:
+        return "pl-lev", '<span class="pill pill-lev">LEVERAGE</span>'
+    if val >= 3.45 and r["price"] <= 9.5:
+        return "pl-val", '<span class="pill pill-val">VALUE</span>'
+    return "", ""
+
+
 def lineup_card(num, rows, s, main):
     tag = '<span class="tag">MAIN</span>' if main else ""
-    chips = "".join(
-        f'<div class="pl"><div class="pos">{r["pos"]} · {r["team"]}</div>'
-        f'<div class="nm">{r["name"]}</div>'
-        f'<div class="nums"><span><b>{r["price"]:.1f}</b>m</span>'
-        f"<span><b>{r['ev']:.1f}</b> pts</span><span><b>{r['own']:.1f}</b>%</span></div></div>"
-        for _, r in rows.iterrows()
-    )
+    chips = []
+    for _, r in rows.iterrows():
+        cls, badge = _player_badge(r)
+        chips.append(
+            f'<div class="pl {cls}">'
+            f'<div class="pos-row"><span class="pos">{r["pos"]} · {r["team"]}</span>{badge}</div>'
+            f'<div class="nm" title="{r["name"]}">{r["name"]}</div>'
+            f'<div class="nums"><span><b>{r["price"]:.1f}</b>m</span>'
+            f'<span><b>{r["ev"]:.1f}</b> pts</span><span><b>{r["own"]:.1f}</b>%</span></div></div>'
+        )
+    chips_html = "".join(chips)
     head = (
         f'<div class="head"><div>{tag}<span class="lbl">Lineup {num}</span></div>'
         f'<div class="stats"><span>Cost <b>{s["cost"]:.1f}m</b></span>'
         f"<span>Proj <b>{s['ev']:.1f}</b></span><span>Own Σ <b>{s['own']:.0f}%</b></span>"
         f"<span>Stack <b>{s['stack']} {s['team']}</b></span></div></div>"
     )
-    return f'<div class="card">{head}<div class="grid">{chips}</div></div>'
+    return f'<div class="card">{head}<div class="grid">{chips_html}</div></div>'
+
+
+def exposure_summary(pool, sets):
+    """Build a portfolio exposure and field-leverage table across all generated lineups."""
+    total_lineups = max(len(sets), 1)
+    counts = Counter()
+    for ids, _ in sets:
+        counts.update(ids)
+    used = pool[pool["pid"].isin(counts)].copy()
+    used["Lineups"] = used["pid"].map(counts)
+    used["My Exp %"] = (100.0 * used["Lineups"] / total_lineups).round(1)
+    used["Field Own %"] = used["own"].round(1)
+    used["Leverage %"] = (used["My Exp %"] - used["Field Own %"]).round(1)
+    used["Value (Pts/M)"] = (used["ev"] / used["price"]).round(2)
+    cols = {
+        "name": "Player",
+        "pos": "Pos",
+        "team": "Team",
+        "price": "Price (M)",
+        "ev": "Proj EV",
+        "Value (Pts/M)": "Value",
+        "Lineups": "Lineups",
+        "My Exp %": "My Exp %",
+        "Field Own %": "Field Own %",
+        "Leverage %": "Leverage %",
+    }
+    out = (
+        used[list(cols.keys())]
+        .rename(columns=cols)
+        .sort_values(["Lineups", "Proj EV"], ascending=[False, False])
+    )
+    out["Price (M)"] = out["Price (M)"].round(1)
+    out["Proj EV"] = out["Proj EV"].round(1)
+    return out
 
 
 st.set_page_config(page_title="Courtside · Fanteam NBA", page_icon="🏀", layout="wide")
@@ -204,6 +255,10 @@ pool = None
 if fan and dft:
     try:
         pool = load_players(fan, dft, sharp)
+        slate_sig = f"{fan.name}-{fan.size}-{dft.name}-{dft.size}"
+        if st.session_state.get("slate_sig") != slate_sig:
+            st.session_state.slate_sig = slate_sig
+            st.session_state.pop("sets", None)
     except (KeyError, ValueError) as e:
         st.error(f"Could not read the files: {e}")
 else:
@@ -356,8 +411,8 @@ if pool is not None:
     pool = pool.assign(own=calibrated_own(pool, beta) if beta is not None else pool.own)
     st.subheader("Daily intel")
     st.caption(
-        f"Projected ownership comes from the {'calibrated model' if beta is not None else 'prior'}. "
-        "Expected points allow for injured teammates through the safety nets."
+        f"Projected ownership comes from the {'calibrated model (with Form & Value scaling)' if beta is not None else 'multi-factor prior'}. "
+        "Expected points allow for injured starters through price-capped safety nets."
     )
     k = st.columns(4)
     k[0].metric("Eligible players", len(pool))
@@ -428,19 +483,59 @@ if pool is not None:
             )
         if not sets:
             st.error("No feasible lineup. Loosen the budget, team cap or locks.")
+            st.session_state.pop("sets", None)
         else:
-            for num, (ids, kind) in enumerate(sets, 1):
-                rows, s = summarise(pool, ids, kind)
-                st.markdown(
-                    lineup_card(num, rows, s, auto and num <= 3), unsafe_allow_html=True
+            st.session_state.sets = sets
+
+    active_sets = st.session_state.get("sets")
+    if active_sets:
+        dl1, dl2 = st.columns(2)
+        try:
+            fanteam_csv = to_fanteam_csv(pool, active_sets, tournament_id=tid)
+            dl1.download_button(
+                f"Download FanTeam Upload CSV ({tid or 'Set ID'})",
+                fanteam_csv,
+                f"fanteam_upload_{tid or 'lineups'}.csv",
+                "text/csv",
+                type="primary",
+                use_container_width=True,
+            )
+        except ValueError as e:
+            dl1.warning(str(e))
+
+        export_rows = []
+        for num, (ids, kind) in enumerate(active_sets, 1):
+            rows, _ = summarise(pool, ids, kind)
+            for _, r in rows.iterrows():
+                export_rows.append(
+                    {
+                        "lineup": num,
+                        "fanteam_id": r.pid,
+                        "player": r["name"],
+                        "pos": r.pos,
+                        "team": r.team,
+                        "price": r.price,
+                        "ev": round(float(r.ev), 1),
+                        "own": round(float(r.own), 1),
+                    }
                 )
-            try:
-                fanteam_csv = to_fanteam_csv(pool, sets, tournament_id=tid)
-                st.download_button(
-                    "Download Fanteam upload CSV",
-                    fanteam_csv,
-                    "courtside_lineups.csv",
-                    "text/csv",
-                )
-            except ValueError as e:
-                st.warning(str(e))
+        dl2.download_button(
+            "Download Readable Audit Table (CSV)",
+            pd.DataFrame(export_rows).to_csv(index=False),
+            "courtside_lineups_audit.csv",
+            "text/csv",
+            use_container_width=True,
+        )
+
+        with st.expander("Portfolio exposure & field leverage summary", expanded=True):
+            st.caption(
+                "Positive Leverage % indicates you are overweight relative to projected field ownership; "
+                "negative Leverage % indicates you are underweight on field chalk."
+            )
+            st.dataframe(exposure_summary(pool, active_sets), hide_index=True, use_container_width=True)
+
+        for num, (ids, kind) in enumerate(active_sets, 1):
+            rows, s = summarise(pool, ids, kind)
+            st.markdown(
+                lineup_card(num, rows, s, auto and num <= 3), unsafe_allow_html=True
+            )

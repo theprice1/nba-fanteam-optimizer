@@ -16,11 +16,12 @@ POS_MAP = {
     "forward_power": "PF",
     "center": "C",
 }
+# Calibrated from historical slate play_rates: confirmed/expected=1.0, possible=0.86, bench=0.65
 AVAIL = {
     "confirmed": 1.0,
     "expected": 1.0,
-    "possible": 0.75,
-    "bench": 0.45,
+    "possible": 0.86,
+    "bench": 0.65,
     "unexpected": 0.10,
     "injured": 0.0,
     "refuted": 0.0,
@@ -76,13 +77,59 @@ def _col(df, *names):
     return next((lower[n] for n in names if n in lower), None)
 
 
-def _best_mate(pool, pid, team, pos):
-    """Best projection among available same-team, same-position teammates."""
+def _best_mate(pool, pid, team, pos, price, proj):
+    """Best projection among cheaper/equal-priced teammates at the same position,
+    capped at the player's own projection so bench backups never inherit superstar EV."""
+    if pd.isna(proj) or pd.isna(price):
+        return 0.0
     m = pool.loc[
-        (pool.team == team) & (pool.pos == pos) & (pool.pid != pid) & (pool.p > 0),
+        (pool.team == team)
+        & (pool.pos == pos)
+        & (pool.pid != pid)
+        & (pool.p > 0)
+        & (pool.price <= price),
         "proj",
     ]
-    return float(m.max()) if m.notna().any() else 0.0
+    best = float(m.max()) if m.notna().any() else 0.0
+    return min(best, float(proj))
+
+
+def _prior_ownership(pool, sharpness):
+    """Multi-factor ownership prior combining projection, salary value (pts/M),
+    FanTeam UI Form, and positional top-2 scarcity."""
+    proj = pool["proj"].clip(lower=0.0).to_numpy(dtype=float)
+    price = pool["price"].clip(lower=4.0).to_numpy(dtype=float)
+    val = proj / price
+    form = pool["form"].fillna(pool["proj"]).clip(lower=0.0).to_numpy(dtype=float)
+
+    z_proj = (proj - proj.mean()) / (proj.std() + 1e-6)
+    z_val = (val - val.mean()) / (val.std() + 1e-6)
+    z_form = (form - form.mean()) / (form.std() + 1e-6)
+
+    val_rank = (
+        pd.Series(val, index=pool.index)
+        .groupby(pool["pos"])
+        .rank(ascending=False)
+        .to_numpy()
+    )
+    proj_rank = (
+        pd.Series(proj, index=pool.index)
+        .groupby(pool["pos"])
+        .rank(ascending=False)
+        .to_numpy()
+    )
+    pos_chalk = ((val_rank <= 2) | (proj_rank <= 2)).astype(float)
+
+    # Scale sharpness (default slider 0.08 -> ~12.5x multiplier on standardized composite score)
+    scale = (sharpness / 0.08) * 1.35
+    composite = (
+        0.55 * z_proj
+        + 0.22 * z_val
+        + 0.18 * z_form
+        + 0.35 * pos_chalk
+    )
+    raw = np.exp(scale * composite) * pool["p"].to_numpy(dtype=float)
+    return pd.Series(700.0 * raw / raw.sum(), index=pool.index).clip(upper=100.0)
 
 
 def load_players(fan_file, dft_file, sharpness):
@@ -106,6 +153,7 @@ def load_players(fan_file, dft_file, sharpness):
     pool["key"] = pool["name"].map(norm)
     pool["p"] = pool["status"].map(AVAIL).fillna(0.0)
     pool["proj"] = np.nan
+    pool["form"] = np.nan
     pool["opp"] = None
 
     dp = _read(dft_file)
@@ -113,15 +161,24 @@ def load_players(fan_file, dft_file, sharpness):
     if pc is None:
         raise ValueError("Projections file needs a Proj column")
     dp["_proj"] = pd.to_numeric(dp[pc], errors="coerce")
+    fc = _col(dp, "form")
+    if fc:
+        dp["_form"] = pd.to_numeric(dp[fc], errors="coerce")
+
     ic = _col(dp, "fanteam id", "fanteam_id", "playerid", "player id")
     nc = _col(dp, "player", "name")
     tc, oc = _col(dp, "team"), _col(dp, "opp", "opponent")
     if ic:
-        pool["proj"] = pool["pid"].map(dp.drop_duplicates(ic).set_index(ic)["_proj"])
+        by_id = dp.drop_duplicates(ic).set_index(ic)
+        pool["proj"] = pool["pid"].map(by_id["_proj"])
+        if fc:
+            pool["form"] = pool["pid"].map(by_id["_form"])
     if nc:
         dp["_key"] = dp[nc].map(norm)
-        byname = dp.drop_duplicates("_key").set_index("_key")["_proj"]
-        pool["proj"] = pool["proj"].fillna(pool["key"].map(byname))
+        by_name = dp.drop_duplicates("_key").set_index("_key")
+        pool["proj"] = pool["proj"].fillna(pool["key"].map(by_name["_proj"]))
+        if fc:
+            pool["form"] = pool["form"].fillna(pool["key"].map(by_name["_form"]))
     if tc and oc:
         opp = {
             team_code(t): team_code(o)
@@ -130,18 +187,22 @@ def load_players(fan_file, dft_file, sharpness):
         }
         pool["opp"] = pool["team"].map(opp)
 
-    # Safety net: if a player is out, the best healthy teammate at his position takes his minutes.
+    pool["form"] = pool["form"].fillna(pool["proj"])
+
+    # Safety net: if a starter is out, the best cheaper/equal teammate at his position takes his spot.
     pool["safety"] = [
-        _best_mate(pool, i, t, s) for i, t, s in zip(pool.pid, pool.team, pool.pos)
+        _best_mate(pool, i, t, s, pr, pj)
+        for i, t, s, pr, pj in zip(
+            pool.pid, pool.team, pool.pos, pool.price, pool.proj
+        )
     ]
     pool["ev"] = pool.p * pool.proj + (1 - pool.p) * pool.safety
     pool = pool[
         (pool.p > 0) & pool.proj.notna() & pool.price.notna() & pool.pos.notna()
     ].copy()
 
-    # Projected ownership prior (sums to 700% = 7 slots x 100%); replace with history later.
-    raw = np.exp(sharpness * pool.proj.clip(lower=0)) * pool.p
-    pool["own"] = (700 * raw / raw.sum()).clip(upper=100)
+    # Multi-factor ownership prior (sums to 700% = 7 slots x 100%)
+    pool["own"] = _prior_ownership(pool, sharpness)
     pool["sigma"] = np.maximum(3.0, 0.35 * pool.ev)
     return pool.reset_index(drop=True)
 
@@ -164,6 +225,8 @@ def solve_one(pool, value, budget, stack, max_team, overlap, prior, locked, opp_
     prob += pulp.lpSum(float(v) * x[i] for v, i in zip(value, ids))
     prob += pulp.lpSum(x.values()) == 7
     prob += pulp.lpSum(price[i] * x[i] for i in ids) <= budget
+    # Prevent high-penalty GPP builds from leaving excessive unused cap on the table
+    prob += pulp.lpSum(price[i] * x[i] for i in ids) >= max(0.0, budget - 2.5)
     for s in SLOTS:
         prob += pulp.lpSum(x[i] for i in ids if pos[i] == s) >= 1
     for members in by_team.values():
@@ -238,7 +301,13 @@ def to_fanteam_csv(pool, out, tournament_id=None):
     slot_rank = {s: idx for idx, s in enumerate(SLOTS)}
     lines = []
     for item in out:
-        ids = item[0] if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], (list, set, tuple)) else item
+        ids = (
+            item[0]
+            if isinstance(item, tuple)
+            and len(item) == 2
+            and isinstance(item[0], (list, set, tuple))
+            else item
+        )
         rows = pool[pool.pid.isin(ids)].copy()
         rows["_slot"] = rows["pos"].map(slot_rank).fillna(99)
         rows = rows.sort_values(["_slot", "ev"], ascending=[True, False])
