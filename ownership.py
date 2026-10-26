@@ -47,6 +47,19 @@ def _find(df, names, label):
     raise ValueError(f"The ownership file needs a {label} column.")
 
 
+ZERO_TOKENS = {"-", "–", "—"}
+POINTS = re.compile(r"[+-]?\d+(\.\d+)?")
+
+
+def _points(s):
+    """Fanteam shows zero-point players with a dash (or 0.00). Both read as zero;
+    anything else that is not a number stays missing."""
+    s = str(s).strip()
+    if s in ZERO_TOKENS:
+        return 0.0
+    return float(s) if POINTS.fullmatch(s) else np.nan
+
+
 def parse_paste(text):
     rows, bad = [], 0
     for raw in text.splitlines():
@@ -64,7 +77,7 @@ def parse_paste(text):
                 "team": team_code(m["team"]),
                 "pos": m["pos"],
                 "own": 0.0 if own == "N/A" else float(own.rstrip("%")),
-                "score": float(score) if re.fullmatch(r"[\d.]+", score) else np.nan,
+                "score": _points(score),
             }
         )
     return pd.DataFrame(rows, columns=["name", "team", "pos", "own", "score"]), bad
@@ -92,7 +105,7 @@ def parse_csv(f):
             "name": df[name_c].str.strip(),
             "team": df[team_c].map(team_code),
             "own": pd.to_numeric(own, errors="coerce").fillna(0.0),
-            "score": pd.to_numeric(df[score_c], errors="coerce"),
+            "score": df[score_c].map(_points).astype(float),
         }
     )
     # Remove exact key duplicates by keeping the row with highest ownership / score
@@ -278,11 +291,12 @@ def report(hist):
 
 
 def play_rates(hist):
-    """Share of each status that scored, from slates with ownership attached."""
-    h = hist[hist.own.notna()].copy()
+    """Share of each status that scored. Only matched players with a projection above
+    zero count: unmatched rows are not DNPs, and zero-projection players are not expected to play."""
+    h = hist[hist.own.notna() & hist.score.notna() & (hist.proj > 0)].copy()
     if h.empty:
         return pd.DataFrame()
-    h["played"] = h.score.fillna(0) > 0
+    h["played"] = h.score > 0
     return (
         h.groupby("status")
         .agg(players=("played", "size"), played_rate=("played", "mean"))

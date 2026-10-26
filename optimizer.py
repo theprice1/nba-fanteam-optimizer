@@ -38,6 +38,14 @@ TEAM_ALIAS = {
     "CHO": "CHA",
 }
 STACK_MIN = 2
+# Portfolio rules (week-1 evidence; revisit each week)
+CEILING_PROJ = 35.0   # projected at this much or more: 19% chance of 50+ (week 1)
+MIN_CEILING = 2       # each lineup needs this many ceiling players
+CHALK_OWN = 30.0      # ownership at or above this counts as chalk
+MAX_CHALK = 3         # each lineup may hold at most this many chalk players
+MAX_OVERLAP = 3       # any two lineups share at most this many players
+MAX_SHARE = 0.4       # with 5+ lineups, no player in more than this share of them
+RELAXED = []          # (lineup number, what was relaxed) from the last build_set
 MODE_CASH = ("Cash", "Pure projection")
 # Auto rotates stack type and ownership penalty so the set covers different builds.
 SCHEDULE = [
@@ -214,7 +222,8 @@ def _value(pool, mode, lam):
     return (pool.ev + 0.3 * pool.sigma - lam * pool.own).to_numpy()
 
 
-def solve_one(pool, value, budget, stack, max_team, overlap, prior, locked, opp_of):
+def solve_one(pool, value, budget, stack, max_team, overlap, prior, locked, opp_of,
+              min_ceiling=0, max_chalk=None):
     ids = pool.pid.tolist()
     price = dict(zip(ids, pool.price))
     pos = dict(zip(ids, pool.pos))
@@ -237,6 +246,17 @@ def solve_one(pool, value, budget, stack, max_team, overlap, prior, locked, opp_
     for i in locked:
         if i in x:
             prob += x[i] == 1
+    proj = dict(zip(ids, pool.proj))
+    own = dict(zip(ids, pool.own))
+    if min_ceiling:
+        hi = [i for i in ids if float(proj[i]) >= CEILING_PROJ]
+        if len(hi) < min_ceiling:
+            return None
+        prob += pulp.lpSum(x[i] for i in hi) >= min_ceiling
+    if max_chalk is not None:
+        ch = [i for i in ids if float(own[i]) >= CHALK_OWN]
+        if ch:
+            prob += pulp.lpSum(x[i] for i in ch) <= max_chalk
     if stack != "none":
         y = pulp.LpVariable.dicts("y", list(by_team), cat="Binary")
         prob += pulp.lpSum(y.values()) == 1
@@ -251,24 +271,46 @@ def solve_one(pool, value, budget, stack, max_team, overlap, prior, locked, opp_
     return [i for i in ids if x[i].value() > 0.5]
 
 
+def _relaxation_steps(min_ceiling, max_chalk):
+    """Rule settings to try, strictest first: relax the ceiling count, then the chalk cap."""
+    steps = [(mc, max_chalk) for mc in range(min_ceiling, -1, -1)]
+    if max_chalk is not None:
+        steps += [(0, mx) for mx in range(max_chalk + 1, 8)]
+    return steps
+
+
 def build_set(
-    pool, budget, mode, n, stack, lam, max_team, overlap, locked, banned, opp_of
+    pool, budget, mode, n, stack, lam, max_team, overlap, locked, banned, opp_of,
+    min_ceiling=MIN_CEILING, max_chalk=MAX_CHALK, max_share=MAX_SHARE,
 ):
-    """Greedy diverse set: each lineup shares at most `overlap` players with every earlier one,
-    and no player appears in more than 60% of lineups (locked players are exempt)."""
+    """Greedy diverse set under the portfolio rules.
+
+    Any two lineups share at most MAX_OVERLAP players. With 5+ lineups no player appears in
+    more than max_share of them. Each lineup has min_ceiling ceiling players and at most
+    max_chalk chalk players. If a lineup cannot meet the rules, the ceiling count (then the
+    chalk cap) is relaxed for that lineup and recorded in RELAXED.
+    """
+    RELAXED.clear()
+    overlap = min(overlap, MAX_OVERLAP)
     prior, out, counts = [], [], Counter()
-    cap = max(1, int(np.ceil(0.6 * n)))
+    cap = max(1, int(np.floor(max_share * n))) if n >= 5 else n
     base = pool[~pool.pid.isin(banned)]
     auto = mode.startswith("Auto")
     for k in range(n):
         st, l = SCHEDULE[k % len(SCHEDULE)] if auto else (stack, lam)
         capped = {i for i, c in counts.items() if c >= cap and i not in locked}
         p = base[~base.pid.isin(capped)]
-        ids = solve_one(
-            p, _value(p, mode, l), budget, st, max_team, overlap, prior, locked, opp_of
-        )
+        ids, step = None, None
+        for mc, mx in _relaxation_steps(min_ceiling, max_chalk):
+            ids = solve_one(p, _value(p, mode, l), budget, st, max_team, overlap, prior,
+                            locked, opp_of, mc, mx)
+            if ids is not None:
+                step = (mc, mx)
+                break
         if ids is None:
             break
+        if step != (min_ceiling, max_chalk):
+            RELAXED.append((k + 1, f"ceiling {step[0]}, chalk cap {step[1]}"))
         prior.append(ids)
         counts.update(ids)
         out.append((ids, st))
