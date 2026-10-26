@@ -1,4 +1,4 @@
-player,position,team,price,ownership,form,projected_points
+player,pos,team,price,own%,form,score
 Cade Cunningham,PG,DET,15.8,33.6,38.50,55.50
 Shai Gilgeous-Alexander,PG,OKC,16.8,12.87,42.75,54.50
 Franz Wagner,SF,ORL,12.7,15.31,35.50,52.75
