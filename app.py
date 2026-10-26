@@ -18,6 +18,7 @@ from intel import (
     value_board,
 )
 from optimizer import build_set, load_players, summarise, to_fanteam_csv
+import optimizer
 from ownership import (
     HIST_COLS,
     attach,
@@ -239,8 +240,10 @@ with st.sidebar:
     stack = "none" if auto else st.selectbox("Stacking", ["team", "bring-back", "none"])
     lam = 0.10 if auto else st.slider("Ownership penalty λ", 0.0, 0.3, 0.10, 0.01)
     max_team = st.slider("Max per team", 2, 5, 4)
-    overlap = st.slider("Max shared players", 3, 6, 4)
+    overlap = st.slider("Max shared players", 3, 6, 3)
     sharp = st.slider("Ownership sharpness (prior)", 0.02, 0.15, 0.08, 0.01)
+    st.sidebar.caption(f"Optimizer file: {optimizer.__file__}")
+    st.sidebar.caption(f"Rules: overlap≤{optimizer.MAX_OVERLAP}, exposure≤{optimizer.MAX_SHARE:.0%}, chalk≤{optimizer.MAX_CHALK}")
 
 st.markdown(
     '<div class="hero"><h1>Courtside</h1><p>Fanteam NBA · main slate lineup engine</p></div>',
@@ -348,7 +351,7 @@ with st.container(border=True):
                     st.caption(f"{bad} lines could not be read.")
 
     hist = st.session_state.hist
-    beta = fit(hist)
+    beta = None  # prior is the default: walk-forward it matched or beat the calibrated model (week 1)
     rep = report(hist)
     m = st.columns(4)
     m[0].metric("Slates saved", hist.slate.nunique())
@@ -481,6 +484,10 @@ if pool is not None:
                 banned,
                 opp_of,
             )
+        if sets and len(sets) < n:
+            st.warning(f"Only {len(sets)} of {n} lineups could be built under the rules. Try a higher budget or fewer locks.")
+        if optimizer.RELAXED:
+            st.info("Relaxed to build: " + ", ".join(f"lineup {k} ({why})" for k, why in optimizer.RELAXED))
         if not sets:
             st.error("No feasible lineup. Loosen the budget, team cap or locks.")
             st.session_state.pop("sets", None)
